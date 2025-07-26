@@ -5,16 +5,18 @@ from torch import Tensor
 from typing import Optional
 from torch.nn.functional import scaled_dot_product_attention
 
-def create_attention_mask(batch_size, ctx, is_causal=True, padding_mask=None, device=None):
-    if is_causal:
-        mask = torch.triu(torch.ones((ctx, ctx), device=device), diagonal=0)
-        mask = mask.expand(batch_size, 1, ctx, ctx)
-    else:
-        mask = torch.zeros((batch_size, 1, ctx, ctx), device=device)
-    if padding_mask is not None:
-        padding_mask = padding_mask.unsqueeze(1).unsqueeze(2).bool()
-        mask = (mask.bool() | (~padding_mask)).float()
-    return mask
+def calculate_attention(q, k, v, mask=None, temperature=1.0, is_causal=True):
+    # masking setup for pure decoder causal asr which typically will not require pad encoder or cross attention masking.
+    batch, head, ctx, dims = q.shape
+    attn_mask = None
+    if mask is not None:
+        mask=mask[:ctx, :ctx]
+    scaled_q = q
+    if temperature != 1.0 and temperature > 0:
+        scaled_q = q * (1.0 / temperature)**.5
+    a = scaled_dot_product_attention(scaled_q, k, v, attn_mask=attn_mask, is_causal=mask is not None and ctx > 1)     
+    out = a.permute(0, 2, 1, 3).flatten(start_dim=2)
+    return out, None
 
 def shape(self, tensor: torch.Tensor, ctx: int, batch: int):
     return tensor.view(batch, ctx, self.head, self.head_dim).transpose(1, 2).contiguous()
