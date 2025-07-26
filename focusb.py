@@ -93,7 +93,9 @@ class attention(nn.Module):
     def _focus(self, x: Tensor, xa: Optional[Tensor] = None, mask: Optional[Tensor] = None):
 
         q, k, v = create_qkv(self.dims, self.head, self.q, self.k, self.v, self.lna(x), self.lna(x if xa is None else xa))
-
+        q=self.lnb(q)
+        k=self.lnb(k)
+        
         iteration = 0
         prev_attn = torch.zeros_like(q)
         attn_out = torch.zeros_like(q)
