@@ -8,13 +8,10 @@ from torch.nn.functional import scaled_dot_product_attention
 def calculate_attention(q, k, v, mask=None, temperature=1.0, is_causal=True):
     # masking setup for pure decoder causal asr which typically will not require pad encoder or cross attention masking.
     batch, head, ctx, dims = q.shape
-    attn_mask = None
-    if mask is not None:
-        mask=mask[:ctx, :ctx]
     scaled_q = q
     if temperature != 1.0 and temperature > 0:
         scaled_q = q * (1.0 / temperature)**.5
-    a = scaled_dot_product_attention(scaled_q, k, v, attn_mask=attn_mask, is_causal=mask is not None and ctx > 1)     
+    a = scaled_dot_product_attention(scaled_q, k, v, is_causal=mask is not None and ctx > 1)     
     out = a.permute(0, 2, 1, 3).flatten(start_dim=2)
     return out, None
 
