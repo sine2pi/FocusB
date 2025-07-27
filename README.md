@@ -9,3 +9,4 @@ Iterative refinement might help the model “think harder” about each chunk of
 Sliding window lets you scale to long sequences without blowing up your GPU.
 Dynamic threshold is a clever way to save compute if the answer is already “good enough.”
 Custom projections per head could let each head specialize more.
+If your stuck behind a bottleneck like a hugging face streaming dataset you can turn the volume up to 11 at no cost.
