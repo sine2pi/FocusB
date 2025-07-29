@@ -37,71 +37,99 @@ def calculate_attention(q, k, v, mask=None, temp=1.0):
 class LocalOut(nn.Module):
     def __init__(self, dims: int, head: int):
         super().__init__()
-        head_dim = dims // head
-        self.query_module = nn.Linear(head_dim, head_dim)
-        self.key_module = nn.Linear(head_dim, head_dim)
-        self.value_module = nn.Linear(head_dim, head_dim)
-        self.out_proj = nn.Linear(head_dim, head_dim)
+        self.head_dim = dims // head
+        self.dims = dims
+        self.q_module = nn.Linear(self.head_dim, self.head_dim)
+        self.k_module = nn.Linear(self.head_dim, self.head_dim)
+        self.v_module = nn.Linear(self.head_dim, self.head_dim)
+        self.o_proj = nn.Linear(self.head_dim, self.head_dim)
 
     def _reshape_to_output(self, attn_output: Tensor) -> Tensor:
         batch, _, ctx, _ = attn_output.shape
-        return attn_output.transpose(1, 2).contiguous().view(batch, ctx, self.dims)        
+        return attn_output.transpose(1, 2).contiguous().view(batch, ctx, self.dims)    
+
 
 class attentionb(nn.Module):
-    def __init__(self, dims: int, head: int, max_iter: int = 3, threshold: float = 0.01, factor: float = 0.1, dropout: float = 0.1, temp = 1.0):
+    def __init__(self, dims: int, head: int, max_iter: int = 3,
+                 threshold: float = 0.01, factor: float = 0.1,
+                 dropout: float = 0.1, temp: float = 1.0,
+                 min_size: int = 64, max_size: int = 2048,
+                 up_win: float = 1.1, down_win: float = 0.9,
+                 up_diff: float = 0.05, down_diff: float = 0.001
+        ):
         super(attentionb, self).__init__()
         self.q,  self.k,  self.v,  self.o, self.lna, self.lnb, self.lnc, self.lnd  = qkv_init(dims, head)
         self.dims = dims
         self.head = head
         self.max_iter = max_iter
         self.threshold = nn.Parameter(torch.tensor(threshold))
-        self.temp = nn.Parameter(torch.tensor(temp), requires_grad=True)        
+        self.temp_base = nn.Parameter(torch.tensor(temp), requires_grad=True)
         self.factor = nn.Parameter(torch.tensor(factor))
-        self.alocal = LocalOut(dims, head)   
+        self.alocal = LocalOut(dims, head)
+
+        self.min_size = min_size
+        self.max_size = max_size
+        self.up_win = up_win
+        self.down_win = down_win
+        self.up_diff = up_diff
+        self.down_diff = down_diff
+
+    def _next_win(self, diff: float, current_size: int, max_len: int) -> int:
+        new_size = current_size
+
+        if diff > self.up_diff:
+            new_size = int(current_size * self.up_win)
+        elif diff < self.down_diff and current_size > self.min_size:
+            new_size = int(current_size * self.down_win)
+        new_size = max(self.min_size, min(new_size, max_len))
+        return new_size
 
     def _focus(self, x: Tensor, xa: Optional[Tensor] = None, mask: Optional[Tensor] = None):
         q = self.q(self.lna(x))
         k = self.k(self.lnb(x if xa is None else xa))
         v = self.v(self.lnb(x if xa is None else xa))
-        q, k, v = shape(self.dims, self.head, q, k, v) 
+        q_full, k_full, v_full = shape(self.dims, self.head, q, k, v)
 
         iteration = 0
-        temp = self.temp.item()
-        prev_out = torch.zeros_like(q)
-        attn_out = torch.zeros_like(q)
+        temp = self.temp_base.item()
+        prev_out = torch.zeros_like(q_full)
+        attn_out = torch.zeros_like(q_full)
         threshold = self.threshold.item()
         factor = self.factor.item()
-        qcur = q
+        qcur = q_full
+
+        cur_win = min(q_full.shape[2], k_full.shape[2], self.max_size)
+        cur_win = max(cur_win, self.min_size)
 
         while iteration < self.max_iter:
-            eff_span = min(qcur.shape[1], k.shape[1])
-            if xa is not None:
-                eff_span = min(eff_span, xa.shape[1])
-            if eff_span == 0: 
+            if cur_win == 0:
                 break
 
-            qiter = qcur[:, :, :eff_span, :]
-            kiter = k[:, :, :eff_span, :]
-            viter = v[:, :, :eff_span, :]
-            q = self.alocal.query_module(qiter)
-            k = self.alocal.key_module(kiter)
-            v = self.alocal.value_module(viter)
+            qiter = qcur[:, :, :cur_win, :]
+            kiter = k_full[:, :, :cur_win, :]
+            viter = v_full[:, :, :cur_win, :]
+
+            q_proj = self.alocal.q_module(qiter)
+            k_proj = self.alocal.k_module(kiter)
+            v_proj = self.alocal.v_module(viter)
 
             iter_mask = None
             if mask is not None:
-                if mask.dim() == 4: 
-                    iter_mask = mask[:, :, :eff_span, :eff_span]
-                elif mask.dim() == 2: 
-                    iter_mask = mask[:eff_span, :eff_span]
+                if mask.dim() == 4:
+                    iter_mask = mask[:, :, :cur_win, :cur_win]
+                elif mask.dim() == 2:
+                    iter_mask = mask[:cur_win, :cur_win]
 
             attn_iter = calculate_attention(
-                self.lnc(q), self.lnd(k), v,
+                self.lnc(q_proj), self.lnd(k_proj), v_proj,
                 mask=iter_mask, temp=temp)
 
             iter_out = torch.zeros_like(qcur)
-            iter_out[:, :, :eff_span, :] = attn_iter
+            iter_out[:, :, :cur_win, :] = attn_iter
+
             diff = torch.abs(iter_out - prev_out).mean()
             dthresh = threshold + factor * diff
+
             if diff < dthresh and iteration > 0:
                 attn_out = iter_out
                 break
@@ -109,6 +137,10 @@ class attentionb(nn.Module):
             prev_out = iter_out.clone()
             qcur = qcur + iter_out
             attn_out = iter_out
+
+            max_len = min(q_full.shape[2], k_full.shape[2])
+            cur_win = self._next_win(diff, cur_win, max_len)
+
             iteration += 1
             temp += 0.005
 
@@ -116,8 +148,7 @@ class attentionb(nn.Module):
         return self.o(output), None
 
     def _slide_win_local(self, x: Tensor, win_size: int, span_len: int, mask: Optional[Tensor] = None) -> Tensor:
-
-        batch, ctx, dims = x.shape
+        _, ctx, _ = x.shape
         output = torch.zeros_like(x)
         num_win = (ctx + win_size - 1) // win_size
 
